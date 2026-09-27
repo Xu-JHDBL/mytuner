@@ -2,15 +2,13 @@
 //  TunerEngine.swift
 //  MyTuner
 //
-//  调音器核心：用 AVAudioEngine 采集麦克风输入，先过窄带带通滤波，再用
-//  YIN 时域自相关算法检测音高。
+//  调音器核心：用 AVAudioEngine 采集麦克风输入，用 YIN 时域自相关算法检测音高。
 //
-//  为什么用「带通 + 时域自相关（YIN）」而不是 FFT？
+//  为什么用「时域自相关（YIN）」而不是 FFT？
 //  - 调音器要测的是基频，尤其贝斯最低弦 E1 只有约 41 Hz；
-//  - 我们只关心「目标弦」这一个频率，所以先把麦克风信号过一遍中心频率 = 目标弦的
-//    窄带带通滤波器（二阶双二阶 biquad），把说话声、其它弦、环境噪声都压掉；
-//  - 剩下的信号再做 YIN：时域自相关按「采样点」直接找周期，低频分辨率天然够用，
-//    抛物线插值把周期精确到亚采样级别，音分误差很小。
+//  - FFT 在低频的分辨率取决于窗口大小，要精确到「音分」级别需要超大 FFT，成本高；
+//  - 时域自相关按「采样点」直接找周期，低频分辨率天然够用，还附带抛物线插值
+//    把周期精确到亚采样级别，音分误差很小。
 //
 //  线程模型（与 MyTempo 节拍器一致）：
 //  - 音频回调只做「拷贝采样」，把重活丢到串行队列 processingQueue；
@@ -32,13 +30,10 @@ final class TunerEngine: ObservableObject {
         }
     }
     /// 当前选中要调的目标弦（midi 编号）；nil 表示尚未选弦。
-    @Published var targetMidi: Int? {
-        didSet { updateBandFrequency() }
-    }
+    @Published var targetMidi: Int?
 
     // MARK: - 检测结果（只读，UI 观察）
     /// 平滑后的检测频率（Hz）；nil 表示当前无有效声音。
-    /// 注意：这是「带通滤波后」的原始基频，是否等于目标弦由 UI 判断。
     @Published private(set) var frequency: Double?
     /// 是否正在采集。
     @Published private(set) var isRunning = false
@@ -50,11 +45,7 @@ final class TunerEngine: ObservableObject {
     private let processingQueue = DispatchQueue(label: "tuner.processing")
     private let lock = NSLock()
 
-    // 带通滤波器中心频率（main 写，processingQueue 读，用 lock 保护）
-    private var bandFreq: Double = 0
-
     // 以下变量只在 processingQueue 访问（串行，无需额外加锁）
-    private var biquad = BiquadFilter()
     private var smoothFrequency: Double?
     private var recent: [Double] = []
 
@@ -63,9 +54,8 @@ final class TunerEngine: ObservableObject {
     private var lastDetection = Date.distantPast
     private var uiTimer: Timer?
 
-    private let minFrequency = 30.0    // 低于此视为噪声
+    private let minFrequency = 30.0    // 低于此视为噪声（低于贝斯 E1）
     private let maxFrequency = 1000.0  // 高于此视为噪声
-    private let bandQ = 12.0           // 带通 Q 值（约 ±70 音分带宽）
 
     // MARK: - 控制
     func start() {
@@ -91,13 +81,6 @@ final class TunerEngine: ObservableObject {
         recent.removeAll()
         uiTimer?.invalidate()
         uiTimer = nil
-    }
-
-    private func updateBandFrequency() {
-        let freq = targetMidi.map { NoteUtil.frequency(of: $0) } ?? 0
-        lock.lock()
-        bandFreq = freq
-        lock.unlock()
     }
 
     // MARK: - 采集
@@ -138,21 +121,7 @@ final class TunerEngine: ObservableObject {
     }
 
     private func process(samples: [Float], sampleRate: Double) {
-        lock.lock()
-        let target = bandFreq
-        lock.unlock()
-
-        // 1) 带通滤波：只保留目标弦频率附近
-        var filtered = samples
-        if target > 0 {
-            if biquad.centerFreq != target {
-                biquad.setBandpass(freq: target, q: bandQ, sampleRate: sampleRate)
-            }
-            filtered = biquad.process(samples)
-        }
-
-        // 2) YIN 音高检测
-        guard let raw = Self.detectPitch(filtered, sampleRate: sampleRate),
+        guard let raw = Self.detectPitch(samples, sampleRate: sampleRate),
               raw > minFrequency, raw < maxFrequency else {
             return
         }
@@ -195,6 +164,7 @@ final class TunerEngine: ObservableObject {
     }
 
     // MARK: - 音高检测（YIN）
+    /// 输入一段单声道采样，返回检测到的基频（Hz）；无法判断则返回 nil。
     static func detectPitch(_ samples: [Float], sampleRate: Double) -> Double? {
         let n = samples.count
         let w = n / 2
@@ -244,35 +214,5 @@ final class TunerEngine: ObservableObject {
 
     deinit {
         stop()
-    }
-}
-
-// MARK: - 二阶双二阶带通滤波器（RBJ BPF）
-private struct BiquadFilter {
-    private var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
-    private var b0 = 0.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0
-    private(set) var centerFreq = 0.0
-
-    mutating func setBandpass(freq: Double, q: Double, sampleRate: Double) {
-        centerFreq = freq
-        let w0 = 2 * Double.pi * freq / sampleRate
-        let alpha = sin(w0) / (2 * q)
-        let b0 = alpha, b1 = 0.0, b2 = -alpha
-        let a0 = 1 + alpha, a1 = -2 * cos(w0), a2 = 1 - alpha
-        self.b0 = b0 / a0; self.b1 = b1 / a0; self.b2 = b2 / a0
-        self.a1 = a1 / a0; self.a2 = a2 / a0
-        x1 = 0; x2 = 0; y1 = 0; y2 = 0
-    }
-
-    mutating func process(_ input: [Float]) -> [Float] {
-        var out = [Float](repeating: 0, count: input.count)
-        for i in 0..<input.count {
-            let x = Double(input[i])
-            let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-            x2 = x1; x1 = x
-            y2 = y1; y1 = y
-            out[i] = Float(y)
-        }
-        return out
     }
 }

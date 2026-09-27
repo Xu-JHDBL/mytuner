@@ -12,7 +12,6 @@ struct ContentView: View {
 
     private let tuneCents = 5.0   // |音分| ≤ 5 视为已调准
     private let gaugeRange = 50.0 // 表盘满偏：±50 音分
-    private let gateCents = 100.0 // 门控范围：|音分| ≤ 100（一整半音）才视为「目标弦」
 
     var body: some View {
         NavigationStack {
@@ -153,19 +152,16 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - 派生数据（从检测频率换算音名 / 音分，并在 UI 层做「目标弦」门控）
+    // MARK: - 派生数据（宽松检测：任何音高都显示，音分相对「最近音名」计算）
     private var nearestMidi: Int? {
         guard let f = tuner.frequency else { return nil }
         return Int(round(NoteUtil.midi(from: f)))
     }
 
-    /// 只有「与目标弦偏差在门控范围（±gateCents）内」时才返回音分；否则返回 nil（视为非目标弦/噪声）。
     private var gaugeCents: Double? {
-        guard let t = tuner.targetMidi, let f = tuner.frequency else { return nil }
+        guard let f = tuner.frequency else { return nil }
         let midi = NoteUtil.midi(from: f)
-        let c = 1200 * (midi - Double(t))
-        guard abs(c) <= gateCents else { return nil }
-        return c
+        return 1200 * (midi - midi.rounded())
     }
 
     private var inTune: Bool {
@@ -174,17 +170,13 @@ struct ContentView: View {
     }
 
     private var noteName: String {
-        guard tuner.isRunning, let t = tuner.targetMidi else { return "——" }
-        if gaugeCents != nil { return NoteUtil.name(of: t) }   // 命中目标（含偏半音内）→ 显示目标音名
-        if let m = nearestMidi { return NoteUtil.name(of: m) } // 非目标弦 → 显示实际听到的音名
-        return "——"
+        guard tuner.isRunning, let m = nearestMidi else { return "——" }
+        return NoteUtil.name(of: m)
     }
 
     private var octaveText: String {
-        guard tuner.isRunning, let t = tuner.targetMidi else { return "" }
-        if gaugeCents != nil { return String(NoteUtil.octave(of: t)) }
-        if let m = nearestMidi { return String(NoteUtil.octave(of: m)) }
-        return ""
+        guard tuner.isRunning, let m = nearestMidi else { return "" }
+        return String(NoteUtil.octave(of: m))
     }
 
     private var statusText: String {
@@ -192,28 +184,27 @@ struct ContentView: View {
             return tuner.targetMidi != nil ? "点「开始」启动调音" : "请选择要调的弦"
         }
         guard tuner.targetMidi != nil else { return "请选择要调的弦" }
-        guard tuner.frequency != nil else { return "等待声音…（拨目标弦）" }
-        if let c = gaugeCents {
-            if inTune { return "已调准 ✓" }
-            return c > 0 ? "偏高 \(formatCents(c)) 音分" : "偏低 \(formatCents(c)) 音分"
-        }
-        return "不是目标弦，已忽略"
+        guard let c = gaugeCents else { return "等待声音…（拨目标弦）" }
+        if inTune { return "已调准 ✓" }
+        return c > 0 ? "偏高 \(formatCents(c)) 音分" : "偏低 \(formatCents(c)) 音分"
     }
 
     private var statusColor: Color {
-        if !tuner.isRunning || tuner.targetMidi == nil || tuner.frequency == nil { return .secondary }
-        if gaugeCents != nil { return inTune ? .green : .orange }
-        return .orange   // 非目标弦
+        guard tuner.isRunning, tuner.targetMidi != nil, gaugeCents != nil else { return .secondary }
+        return inTune ? .green : .orange
     }
 
     private var frequencyText: String {
         guard let f = tuner.frequency else { return "" }
         var text = String(format: "%.1f Hz", f)
-        // 只有命中目标弦时才显示弦号
-        if gaugeCents != nil, let t = tuner.targetMidi {
-            text += " · \(tuningStringLabel(t))"
-        }
+        if matched { text += " · \(tuningStringLabel(tuner.targetMidi!))" }
         return text
+    }
+
+    /// 检测到的音名正好等于选中的目标弦。
+    private var matched: Bool {
+        guard let t = tuner.targetMidi, let m = nearestMidi else { return false }
+        return m == t
     }
 
     private func tuningStringLabel(_ midi: Int) -> String {
@@ -227,25 +218,25 @@ struct ContentView: View {
     private var doneButtonLabel: String {
         guard let t = tuner.targetMidi else { return "标记调音完成" }
         if doneStrings.contains(t) { return "已调完 ✓（点击取消）" }
-        return inTune ? "标记调音完成" : "调准后点击标记"
+        return (matched && inTune) ? "标记调音完成" : "调准后点击标记"
     }
 
     private var doneButtonDisabled: Bool {
         guard let t = tuner.targetMidi else { return true }
         if doneStrings.contains(t) { return false }
-        return !inTune
+        return !(matched && inTune)
     }
 
     private var doneButtonBackground: Color {
         guard let t = tuner.targetMidi else { return Color.gray.opacity(0.15) }
         if doneStrings.contains(t) { return Color.green.opacity(0.25) }
-        return inTune ? .green : Color.gray.opacity(0.15)
+        return (matched && inTune) ? .green : Color.gray.opacity(0.15)
     }
 
     private var doneButtonForeground: Color {
         guard let t = tuner.targetMidi else { return .secondary }
         if doneStrings.contains(t) { return .green }
-        return inTune ? Color(.systemBackground) : .secondary
+        return (matched && inTune) ? Color(.systemBackground) : .secondary
     }
 
     private func formatCents(_ c: Double) -> String {
@@ -298,7 +289,7 @@ struct TunerGauge: View {
                 context.stroke(t, with: .color(Color.gray.opacity(0.45)), lineWidth: major ? 2.5 : 1.5)
             }
 
-            // 指针（非目标弦/静默时停在中间）
+            // 指针（静默时停在中间）
             let c = min(max(cents ?? 0, -gaugeRange), gaugeRange)
             var needle = Path()
             needle.move(to: pt(c, 6))

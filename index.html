@@ -129,7 +129,7 @@
     transition: color 0.15s;
   }
   .note-status.tuned { color: var(--good); }
-  .note-status.sharp, .note-status.flat, .note-status.wrong { color: var(--accent); }
+  .note-status.sharp, .note-status.flat { color: var(--accent); }
   .note-freq {
     font-size: 14px;
     color: var(--muted);
@@ -217,7 +217,7 @@
     instrument: "guitar",     // "guitar" 吉他 / "bass" 贝斯
     selectedMidi: null,       // 当前选中要调的目标弦（midi 编号）
     running: false,
-    freq: null,               // 平滑后的检测频率（Hz，已过带通滤波）
+    freq: null,               // 平滑后的检测频率（Hz）
     done: new Set(),          // 已标记「调音完成」的弦（midi 集合，跨乐器全局唯一）
   };
 
@@ -225,8 +225,6 @@
   const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
   const TUNE_CENTS = 5;      // |音分| ≤ 5 视为已调准（绿色）
   const GAUGE_RANGE = 50;    // 表盘满偏：±50 音分
-  const GATE_CENTS = 100;    // 门控范围：|音分| ≤ 100（一整半音）才视为「目标弦」，超出则忽略
-  const BAND_Q = 12;         // 带通滤波器 Q 值（约 ±70 音分带宽，够盖住目标弦的偏差）
 
   // 各乐器的标准调弦（低音弦 → 高音弦）。midi 用于精确计算频率：A4=440Hz 对应 midi 69。
   const TUNINGS = {
@@ -260,7 +258,6 @@
 
   // ---------- 音频 ----------
   let ctx = null;
-  let bandpass = null;
   let analyser = null;
   let timeData = null;
   let stream = null;
@@ -282,19 +279,11 @@
     ctx = new AC();
     const src = ctx.createMediaStreamSource(stream);
 
-    // 窄带带通：只保留「目标弦频率附近」的能量，滤掉说话声/其它弦/环境噪声
-    bandpass = ctx.createBiquadFilter();
-    bandpass.type = "bandpass";
-    bandpass.Q.value = BAND_Q;
-    bandpass.frequency.value = 200;   // 占位，选中目标弦后再更新
-
+    // AnalyserNode 提供「时域波形」，配合自相关（YIN）做音高检测
     analyser = ctx.createAnalyser();
     analyser.fftSize = 4096;   // 4096 点窗口，覆盖贝斯最低弦 E1（约 41 Hz）的数个周期
     timeData = new Float32Array(analyser.fftSize);
-
-    src.connect(bandpass);
-    bandpass.connect(analyser);
-    updateBandpass();
+    src.connect(analyser);
 
     await ctx.resume();
     state.running = true;
@@ -310,15 +299,9 @@
     state.freq = null;
     if (rafID) { cancelAnimationFrame(rafID); rafID = null; }
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-    if (ctx) { ctx.close(); ctx = null; analyser = null; bandpass = null; }
+    if (ctx) { ctx.close(); ctx = null; analyser = null; }
     updatePlayIcon();
     render();
-  }
-
-  // 选中目标弦后，把带通滤波器中心对准目标频率
-  function updateBandpass() {
-    if (!bandpass) return;
-    bandpass.frequency.value = state.selectedMidi != null ? midiToFreq(state.selectedMidi) : 200;
   }
 
   // ---------- 音高检测（YIN 算法）----------
@@ -419,30 +402,28 @@
   function render() {
     const t = targetString();
 
-    if (!state.running) {
-      renderIdle();
-      return;
-    }
-    if (!t) {
-      renderPrompt();
-      return;
-    }
+    if (!state.running) { renderIdle(); return; }
+    if (!t) { renderPrompt(); return; }
     const f = state.freq;
-    if (f == null) {
-      renderSilent();
-      return;
-    }
+    if (f == null) { renderSilent(); return; }
 
+    // 宽松检测：任何有效音高都显示（相对「最近音名」计算音分，与最初版本一致）
     const midi = freqToMidi(f);
-    const cents = 1200 * (midi - t.midi);   // 相对目标弦的音分（正 = 偏高）
-    if (Math.abs(cents) > GATE_CENTS) {
-      // 超过一整半音：判定为其它弦/说话声/噪声 → 滤除，不参与调音
-      renderWrongNote(Math.round(midi));
-      return;
-    }
-
+    const nearest = Math.round(midi);
+    const cents = 1200 * (midi - nearest);
     const inTune = Math.abs(cents) <= TUNE_CENTS;
-    renderNote(t, cents, f, inTune);
+    const matched = nearest === t.midi;
+
+    noteNameEl.textContent = noteNameOf(nearest);
+    noteOctEl.textContent = octaveOf(nearest);
+    noteNameWrap.classList.toggle("tuned", inTune);
+    noteStatusEl.className = "note-status" + (inTune ? " tuned" : cents > 0 ? " sharp" : " flat");
+    noteStatusEl.textContent = inTune
+      ? "已调准 ✓"
+      : (cents > 0 ? "偏高" : "偏低") + " " + (cents > 0 ? "+" : "") + Math.round(cents) + " 音分";
+    noteFreqEl.textContent = freq.toFixed(1) + " Hz" + (matched ? " · " + t.num + "弦" : "");
+    setNeedle(cents, inTune);
+    updateDoneButton(matched && inTune);
   }
 
   function renderIdle() {
@@ -478,37 +459,13 @@
     updateDoneButton(false);
   }
 
-  function renderWrongNote(nearest) {
-    noteNameEl.textContent = noteNameOf(nearest);
-    noteOctEl.textContent = octaveOf(nearest);
-    noteNameWrap.classList.remove("tuned");
-    noteStatusEl.className = "note-status wrong";
-    noteStatusEl.textContent = "不是目标弦，已忽略";
-    noteFreqEl.textContent = state.freq.toFixed(1) + " Hz";
-    setNeedle(0, false);
-    updateDoneButton(false);
-  }
-
-  function renderNote(t, cents, freq, inTune) {
-    noteNameEl.textContent = noteNameOf(t.midi);
-    noteOctEl.textContent = octaveOf(t.midi);
-    noteNameWrap.classList.toggle("tuned", inTune);
-    noteStatusEl.className = "note-status" + (inTune ? " tuned" : cents > 0 ? " sharp" : " flat");
-    noteStatusEl.textContent = inTune
-      ? "已调准 ✓"
-      : (cents > 0 ? "偏高" : "偏低") + " " + (cents > 0 ? "+" : "") + Math.round(cents) + " 音分";
-    noteFreqEl.textContent = freq.toFixed(1) + " Hz · " + t.num + "弦";
-    setNeedle(cents, inTune);
-    updateDoneButton(inTune);
-  }
-
   function setStatus(text, cls) {
     noteStatusEl.className = "note-status " + (cls || "");
     noteStatusEl.textContent = text;
   }
 
   // ---------- 调音完成按钮 ----------
-  function updateDoneButton(inTune) {
+  function updateDoneButton(ready) {
     const t = targetString();
     if (!t) {
       doneBtn.disabled = true;
@@ -520,7 +477,7 @@
       doneBtn.disabled = false;
       doneBtn.className = "done-btn done";
       doneBtn.textContent = "已调完 ✓（点击取消）";
-    } else if (inTune) {
+    } else if (ready) {
       doneBtn.disabled = false;
       doneBtn.className = "done-btn active";
       doneBtn.textContent = "标记调音完成";
@@ -640,7 +597,6 @@
 
   function setSelected(midi) {
     state.selectedMidi = midi;
-    updateBandpass();
     syncChips();
     render();
   }
@@ -650,7 +606,6 @@
     state.selectedMidi = null;   // 换乐器后需重新选弦
     buildChips();
     syncChips();
-    updateBandpass();
     [...document.getElementById("instSeg").children].forEach((btn, i) => {
       btn.classList.toggle("selected", Object.keys(TUNINGS)[i] === key);
     });
