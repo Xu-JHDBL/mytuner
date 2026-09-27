@@ -7,17 +7,20 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var tuner = TunerEngine()
+    /// 已标记「调音完成」的弦（midi 集合，跨乐器全局唯一）
+    @State private var doneStrings: Set<Int> = []
 
     private let tuneCents = 5.0   // |音分| ≤ 5 视为已调准
     private let gaugeRange = 50.0 // 表盘满偏：±50 音分
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
+            VStack(spacing: 22) {
                 instrumentPicker
+                stringPicker
                 gauge
                 noteDisplay
-                stringPicker
+                doneButton
                 Spacer(minLength: 0)
                 startButton
             }
@@ -37,9 +40,54 @@ struct ContentView: View {
         .pickerStyle(.segmented)
     }
 
+    // MARK: - 目标琴弦（点选）
+    private var stringPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("选择要调的弦")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(tuner.instrument.strings) { s in
+                        stringChip(s)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    private func stringChip(_ s: TuningString) -> some View {
+        let isSelected = tuner.targetMidi == s.midi
+        let isDone = doneStrings.contains(s.midi)
+        return Button {
+            tuner.targetMidi = s.midi
+        } label: {
+            VStack(spacing: 2) {
+                Text(s.noteName + (isDone ? " ✓" : ""))
+                    .font(.title3.weight(.semibold))
+                Text("\(s.stringNumber)弦")
+                    .font(.caption2)
+                    .foregroundColor(isDone ? Color.green : .secondary)
+            }
+            .foregroundColor(isDone ? .green : .primary)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
+            .background(
+                Capsule().fill(isDone ? Color.green.opacity(0.35)
+                               : isSelected ? Color.gray.opacity(0.3)
+                               : Color.gray.opacity(0.15))
+            )
+            .overlay(
+                Capsule().stroke(isSelected ? Color.orange : .clear, lineWidth: 2)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - 指针表盘
     private var gauge: some View {
-        TunerGauge(cents: cents, inTune: inTune, gaugeRange: gaugeRange)
+        TunerGauge(cents: gaugeCents, inTune: inTune, gaugeRange: gaugeRange)
             .frame(height: 170)
     }
 
@@ -68,42 +116,21 @@ struct ContentView: View {
         .frame(height: 150)
     }
 
-    // MARK: - 目标琴弦
-    private var stringPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("目标琴弦")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(tuner.instrument.strings) { s in
-                        stringChip(s)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
+    // MARK: - 调音完成按钮
+    private var doneButton: some View {
+        Button {
+            guard let t = tuner.targetMidi else { return }
+            if doneStrings.contains(t) { doneStrings.remove(t) } else { doneStrings.insert(t) }
+        } label: {
+            Text(doneButtonLabel)
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(doneButtonBackground)
+                .foregroundColor(doneButtonForeground)
+                .cornerRadius(14)
         }
-    }
-
-    private func stringChip(_ s: TuningString) -> some View {
-        let matched = nearestMidi == s.midi
-        return VStack(spacing: 2) {
-            Text(s.noteName)
-                .font(.title3.weight(.semibold))
-            Text("\(s.stringNumber)弦")
-                .font(.caption2)
-                .foregroundColor(matched && inTune ? .green : .secondary)
-        }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 14)
-        .background(
-            Capsule().fill(matched && inTune
-                           ? Color.green
-                           : matched
-                             ? Color.gray.opacity(0.3)
-                             : Color.gray.opacity(0.15))
-        )
-        .foregroundColor(matched && inTune ? Color(.systemBackground) : .primary)
+        .disabled(doneButtonDisabled)
     }
 
     // MARK: - 开始 / 停止
@@ -118,59 +145,101 @@ struct ContentView: View {
                     .frame(width: 88, height: 88)
                     .background(Circle().fill(Color.orange))
             }
-            Text("点击「开始」并允许麦克风权限，靠近琴弦拨动单根弦")
+            Text("1. 选乐器 → 2. 选要调的弦 → 3. 点「开始」允许麦克风，拨该弦")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
         }
     }
 
-    // MARK: - 派生数据（从检测频率换算音名 / 音分）
+    // MARK: - 派生数据（从检测频率换算音名 / 音分，并在 UI 层做「目标弦」门控）
     private var nearestMidi: Int? {
         guard let f = tuner.frequency else { return nil }
         return Int(round(NoteUtil.midi(from: f)))
     }
 
-    private var cents: Double? {
-        guard let f = tuner.frequency else { return nil }
+    /// 只有「最近音名 == 目标弦」时才返回音分；否则返回 nil（视为非目标弦/噪声）。
+    private var gaugeCents: Double? {
+        guard let t = tuner.targetMidi, let f = tuner.frequency else { return nil }
         let midi = NoteUtil.midi(from: f)
-        return 1200 * (midi - midi.rounded())
+        guard Int(midi.rounded()) == t else { return nil }
+        return 1200 * (midi - Double(t))
     }
 
     private var inTune: Bool {
-        guard let c = cents else { return false }
+        guard let c = gaugeCents else { return false }
         return abs(c) <= tuneCents
     }
 
     private var noteName: String {
-        guard let m = nearestMidi else { return "——" }
-        return NoteUtil.name(of: m)
+        guard tuner.isRunning, tuner.targetMidi != nil, let m = nearestMidi else { return "——" }
+        return NoteUtil.name(of: m)   // 目标弦命中时 == 目标音名；非目标弦时 == 实际听到的音名
     }
 
     private var octaveText: String {
-        guard let m = nearestMidi else { return "" }
+        guard tuner.isRunning, tuner.targetMidi != nil, let m = nearestMidi else { return "" }
         return String(NoteUtil.octave(of: m))
     }
 
     private var statusText: String {
-        guard let c = cents else { return "等待声音…" }
-        if inTune { return "已调准 ✓" }
-        return c > 0 ? "偏高 \(formatCents(c)) 音分" : "偏低 \(formatCents(c)) 音分"
+        if !tuner.isRunning {
+            return tuner.targetMidi != nil ? "点「开始」启动调音" : "请选择要调的弦"
+        }
+        guard tuner.targetMidi != nil else { return "请选择要调的弦" }
+        guard tuner.frequency != nil else { return "等待声音…（拨目标弦）" }
+        if let c = gaugeCents {
+            if inTune { return "已调准 ✓" }
+            return c > 0 ? "偏高 \(formatCents(c)) 音分" : "偏低 \(formatCents(c)) 音分"
+        }
+        return "不是目标弦，已忽略"
     }
 
     private var statusColor: Color {
-        guard let c = cents else { return .secondary }
-        return inTune ? .green : .orange
+        if !tuner.isRunning || tuner.targetMidi == nil || tuner.frequency == nil { return .secondary }
+        if gaugeCents != nil { return inTune ? .green : .orange }
+        return .orange   // 非目标弦
     }
 
     private var frequencyText: String {
         guard let f = tuner.frequency else { return "" }
         var text = String(format: "%.1f Hz", f)
-        if let m = nearestMidi,
-           let matched = tuner.instrument.strings.first(where: { $0.midi == m }) {
-            text += " · \(matched.stringNumber)弦"
+        // 只有命中目标弦时才显示弦号
+        if gaugeCents != nil, let t = tuner.targetMidi {
+            text += " · \(tuningStringLabel(t))"
         }
         return text
+    }
+
+    private func tuningStringLabel(_ midi: Int) -> String {
+        if let s = tuner.instrument.strings.first(where: { $0.midi == midi }) {
+            return "\(s.stringNumber)弦"
+        }
+        return ""
+    }
+
+    // MARK: - 调音完成按钮样式
+    private var doneButtonLabel: String {
+        guard let t = tuner.targetMidi else { return "标记调音完成" }
+        if doneStrings.contains(t) { return "已调完 ✓（点击取消）" }
+        return inTune ? "标记调音完成" : "调准后点击标记"
+    }
+
+    private var doneButtonDisabled: Bool {
+        guard let t = tuner.targetMidi else { return true }
+        if doneStrings.contains(t) { return false }
+        return !inTune
+    }
+
+    private var doneButtonBackground: Color {
+        guard let t = tuner.targetMidi else { return Color.gray.opacity(0.15) }
+        if doneStrings.contains(t) { return Color.green.opacity(0.25) }
+        return inTune ? .green : Color.gray.opacity(0.15)
+    }
+
+    private var doneButtonForeground: Color {
+        guard let t = tuner.targetMidi else { return .secondary }
+        if doneStrings.contains(t) { return .green }
+        return inTune ? Color(.systemBackground) : .secondary
     }
 
     private func formatCents(_ c: Double) -> String {
@@ -191,7 +260,6 @@ struct TunerGauge: View {
             let cy = size.height * 0.96
             let r = min(size.width, size.height * 2) * 0.86
 
-            // 角度换算：音分 c ∈ [-range, range] → 角度 ∈ [-90°, 90°]（0 = 竖直向上）
             func pt(_ c: Double, _ radius: Double) -> CGPoint {
                 let deg = (c / gaugeRange) * 90 * .pi / 180
                 return CGPoint(x: cx + radius * sin(deg), y: cy - radius * cos(deg))
@@ -224,7 +292,7 @@ struct TunerGauge: View {
                 context.stroke(t, with: .color(Color.gray.opacity(0.45)), lineWidth: major ? 2.5 : 1.5)
             }
 
-            // 指针
+            // 指针（非目标弦/静默时停在中间）
             let c = min(max(cents ?? 0, -gaugeRange), gaugeRange)
             var needle = Path()
             needle.move(to: pt(c, 6))
