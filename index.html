@@ -225,6 +225,7 @@
   const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
   const TUNE_CENTS = 5;      // |音分| ≤ 5 视为已调准（绿色）
   const GAUGE_RANGE = 50;    // 表盘满偏：±50 音分
+  const GATE_CENTS = 100;    // 门控范围：|音分| ≤ 100（一整半音）才视为「目标弦」，超出则忽略
   const BAND_Q = 12;         // 带通滤波器 Q 值（约 ±70 音分带宽，够盖住目标弦的偏差）
 
   // 各乐器的标准调弦（低音弦 → 高音弦）。midi 用于精确计算频率：A4=440Hz 对应 midi 69。
@@ -433,14 +434,13 @@
     }
 
     const midi = freqToMidi(f);
-    const nearest = Math.round(midi);
-    if (nearest !== t.midi) {
-      // 检测到了声音，但不是目标弦（说话/其它弦/噪声）→ 滤除，不参与调音
-      renderWrongNote(nearest);
+    const cents = 1200 * (midi - t.midi);   // 相对目标弦的音分（正 = 偏高）
+    if (Math.abs(cents) > GATE_CENTS) {
+      // 超过一整半音：判定为其它弦/说话声/噪声 → 滤除，不参与调音
+      renderWrongNote(Math.round(midi));
       return;
     }
 
-    const cents = 1200 * (midi - t.midi);
     const inTune = Math.abs(cents) <= TUNE_CENTS;
     renderNote(t, cents, f, inTune);
   }

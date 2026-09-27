@@ -12,6 +12,7 @@ struct ContentView: View {
 
     private let tuneCents = 5.0   // |音分| ≤ 5 视为已调准
     private let gaugeRange = 50.0 // 表盘满偏：±50 音分
+    private let gateCents = 100.0 // 门控范围：|音分| ≤ 100（一整半音）才视为「目标弦」
 
     var body: some View {
         NavigationStack {
@@ -158,12 +159,13 @@ struct ContentView: View {
         return Int(round(NoteUtil.midi(from: f)))
     }
 
-    /// 只有「最近音名 == 目标弦」时才返回音分；否则返回 nil（视为非目标弦/噪声）。
+    /// 只有「与目标弦偏差在门控范围（±gateCents）内」时才返回音分；否则返回 nil（视为非目标弦/噪声）。
     private var gaugeCents: Double? {
         guard let t = tuner.targetMidi, let f = tuner.frequency else { return nil }
         let midi = NoteUtil.midi(from: f)
-        guard Int(midi.rounded()) == t else { return nil }
-        return 1200 * (midi - Double(t))
+        let c = 1200 * (midi - Double(t))
+        guard abs(c) <= gateCents else { return nil }
+        return c
     }
 
     private var inTune: Bool {
@@ -172,13 +174,17 @@ struct ContentView: View {
     }
 
     private var noteName: String {
-        guard tuner.isRunning, tuner.targetMidi != nil, let m = nearestMidi else { return "——" }
-        return NoteUtil.name(of: m)   // 目标弦命中时 == 目标音名；非目标弦时 == 实际听到的音名
+        guard tuner.isRunning, let t = tuner.targetMidi else { return "——" }
+        if gaugeCents != nil { return NoteUtil.name(of: t) }   // 命中目标（含偏半音内）→ 显示目标音名
+        if let m = nearestMidi { return NoteUtil.name(of: m) } // 非目标弦 → 显示实际听到的音名
+        return "——"
     }
 
     private var octaveText: String {
-        guard tuner.isRunning, tuner.targetMidi != nil, let m = nearestMidi else { return "" }
-        return String(NoteUtil.octave(of: m))
+        guard tuner.isRunning, let t = tuner.targetMidi else { return "" }
+        if gaugeCents != nil { return String(NoteUtil.octave(of: t)) }
+        if let m = nearestMidi { return String(NoteUtil.octave(of: m)) }
+        return ""
     }
 
     private var statusText: String {
