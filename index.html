@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>MyTuner · 调音器</title>
+<style>
+  :root {
+    --bg: #121216;
+    --card: #1d1d24;
+    --text: #f2f2f5;
+    --muted: #9a9aa5;
+    --accent: #ff9500;
+    --dot: #3a3a44;
+    --good: #30d158;
+    --bad: #ff453a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+  }
+  .container {
+    width: 100%;
+    max-width: 430px;
+    padding: 24px 20px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 26px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    text-align: center;
+    margin: 0;
+    letter-spacing: 0.5px;
+  }
+  h1 span { color: var(--accent); }
+
+  /* 乐器切换（吉他 / 贝斯） */
+  .seg {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+    background: var(--card);
+    border-radius: 12px;
+    padding: 5px;
+  }
+  .seg button {
+    border: none; background: none;
+    color: var(--muted);
+    padding: 9px 0;
+    font-size: 16px;
+    font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .seg button.selected { background: var(--accent); color: #fff; }
+
+  /* 表盘（指针） */
+  .gauge-wrap {
+    display: flex;
+    justify-content: center;
+  }
+  .gauge-svg { width: 100%; max-width: 340px; display: block; }
+
+  /* 音符显示 */
+  .note-display { text-align: center; }
+  .note-name {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 4px;
+    font-size: 88px;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    transition: color 0.15s;
+  }
+  .note-name.tuned { color: var(--good); }
+  .note-oct {
+    font-size: 26px;
+    font-weight: 600;
+    color: var(--muted);
+    transition: color 0.15s;
+  }
+  .note-name.tuned .note-oct { color: var(--good); }
+  .note-status {
+    font-size: 17px;
+    font-weight: 600;
+    margin-top: 10px;
+    color: var(--muted);
+    transition: color 0.15s;
+  }
+  .note-status.tuned { color: var(--good); }
+  .note-status.sharp, .note-status.flat { color: var(--accent); }
+  .note-freq {
+    font-size: 14px;
+    color: var(--muted);
+    margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 分区标题 */
+  .label { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+
+  /* 目标琴弦 chips */
+  .chips {
+    display: flex; gap: 10px;
+    overflow-x: auto;
+    padding: 4px 0;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: 0 0 auto;
+    padding: 9px 16px;
+    border-radius: 20px;
+    border: none;
+    background: var(--card);
+    color: var(--text);
+    font-size: 17px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .chip .chip-num { color: var(--muted); font-size: 13px; font-weight: 500; }
+  .chip.active { background: #2a2a34; }
+  .chip.tuned { background: var(--good); color: #06210f; }
+  .chip.tuned .chip-num { color: #0d3a1c; }
+
+  /* 播放按钮（开始/停止调音） */
+  .play-wrap { display: flex; justify-content: center; }
+  .play {
+    width: 92px; height: 92px;
+    border-radius: 50%;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 8px 24px rgba(255,149,0,0.35);
+  }
+  .play:active { transform: scale(0.96); }
+  .play .icon { font-size: 40px; line-height: 1; }
+  .foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>MyTuner <span>调音器</span></h1>
+
+  <!-- 乐器切换 -->
+  <div class="seg" id="instSeg"></div>
+
+  <!-- 指针表盘 -->
+  <div class="gauge-wrap" id="gaugeWrap"></div>
+
+  <!-- 音符显示 -->
+  <div class="note-display">
+    <div class="note-name" id="noteNameWrap">
+      <span id="noteName">——</span><span class="note-oct" id="noteOct"></span>
+    </div>
+    <div class="note-status" id="noteStatus">等待声音…</div>
+    <div class="note-freq" id="noteFreq"></div>
+  </div>
+
+  <!-- 目标琴弦 -->
+  <div>
+    <div class="label">目标琴弦</div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <!-- 开始 / 停止 -->
+  <div class="play-wrap">
+    <button class="play" id="play">
+      <span class="icon" id="playIcon">▶</span>
+    </button>
+  </div>
+  <div class="foot">点击「开始」并允许麦克风权限，靠近琴弦拨动单根弦<br>（麦克风需在 HTTPS 或 localhost 下才能使用）</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- 状态 ----------
+  const state = {
+    instrument: "guitar",   // "guitar" 吉他 / "bass" 贝斯
+    running: false,
+    freq: null,             // 平滑后的检测频率（Hz）
+  };
+
+  // ---------- 常量 ----------
+  const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const TUNE_CENTS = 5;      // |音分| ≤ 5 视为已调准（绿色）
+  const GAUGE_RANGE = 50;    // 表盘满偏：±50 音分
+
+  // 各乐器的标准调弦（低音弦 → 高音弦）。midi 用于精确计算频率：A4=440Hz 对应 midi 69。
+  const TUNINGS = {
+    guitar: {
+      label: "吉他",
+      strings: [
+        { num: 6, midi: 40 }, // E2
+        { num: 5, midi: 45 }, // A2
+        { num: 4, midi: 50 }, // D3
+        { num: 3, midi: 55 }, // G3
+        { num: 2, midi: 59 }, // B3
+        { num: 1, midi: 64 }, // E4
+      ],
+    },
+    bass: {
+      label: "贝斯",
+      strings: [
+        { num: 4, midi: 28 }, // E1
+        { num: 3, midi: 33 }, // A1
+        { num: 2, midi: 38 }, // D2
+        { num: 1, midi: 43 }, // G2
+      ],
+    },
+  };
+
+  // ---------- 音高换算工具 ----------
+  function midiToFreq(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+  function freqToMidi(f) { return 69 + 12 * Math.log2(f / 440); }
+  function noteNameOf(m) { return NOTE_NAMES[((m % 12) + 12) % 12]; }
+  function octaveOf(m) { return Math.floor(m / 12) - 1; }
+
+  // ---------- 音频 ----------
+  let ctx = null;
+  let analyser = null;
+  let timeData = null;
+  let stream = null;
+  let rafID = null;
+  let lastProcess = 0;
+  let lastDetection = -1e9;
+  let recent = [];   // 最近几次原始频率，做中值滤波抑制八度跳变
+
+  async function start() {
+    if (state.running) return;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      setStatus("无法访问麦克风，请检查权限", "flat");
+      return;
+    }
+
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC();
+    const src = ctx.createMediaStreamSource(stream);
+    // AnalyserNode 提供「时域波形」，配合自相关（YIN）做音高检测
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 4096;   // 4096 点窗口，覆盖贝斯最低弦 E1（约 41 Hz）的数个周期
+    timeData = new Float32Array(analyser.fftSize);
+    src.connect(analyser);
+
+    await ctx.resume();
+    state.running = true;
+    recent = [];
+    updatePlayIcon();
+    lastProcess = 0;
+    lastDetection = -1e9;
+    requestAnimationFrame(tick);
+  }
+
+  function stop() {
+    state.running = false;
+    state.freq = null;
+    if (rafID) { cancelAnimationFrame(rafID); rafID = null; }
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    if (ctx) { ctx.close(); ctx = null; analyser = null; }
+    updatePlayIcon();
+    renderSilent();
+    setNeedle(0, false);
+  }
+
+  // ---------- 音高检测（YIN 算法）----------
+  // 时域自相关比 FFT 更适合低频（贝斯），无需大 FFT 也能达到低频所需的精度。
+  function detectPitch(samples, sampleRate) {
+    const n = samples.length;
+    const w = Math.floor(n / 2);   // 最大滞后 τ 上限 → 最低可测频率 = sampleRate / w
+    if (w < 2) return null;
+
+    // 1) 静音检测：RMS 过低直接放弃（省去后续计算，也避免把噪声当音高）
+    let sumSq = 0;
+    for (let i = 0; i < n; i++) sumSq += samples[i] * samples[i];
+    const rms = Math.sqrt(sumSq / n);
+    if (rms < 0.01) return null;
+
+    // 2) 差值函数 d(τ) = Σ (x[j] - x[j+τ])²
+    const d = new Float32Array(w + 1);
+    for (let tau = 0; tau <= w; tau++) {
+      let s = 0;
+      for (let j = 0; j < w; j++) {
+        const diff = samples[j] - samples[j + tau];
+        s += diff * diff;
+      }
+      d[tau] = s;
+    }
+
+    // 3) 累计均值归一化（CMNDF）：d'(τ) = d(τ) / [(1/τ)·Σ d(j)]，d'(0) = 1
+    const dNorm = new Float32Array(w + 1);
+    dNorm[0] = 1;
+    let running = 0;
+    for (let tau = 1; tau <= w; tau++) {
+      running += d[tau];
+      dNorm[tau] = running > 0 ? (d[tau] * tau) / running : 1;
+    }
+
+    // 4) 绝对阈值：找到第一个低于阈值的 τ（跳过过小的 τ 避免高频误判）
+    const threshold = 0.15;
+    let tau = 2;
+    while (tau < w && dNorm[tau] >= threshold) tau++;
+    if (tau >= w) return null;
+
+    // 5) 局部最小值精化 + 抛物线插值 → 亚采样精度
+    while (tau + 1 <= w && dNorm[tau + 1] < dNorm[tau]) tau++;
+    if (tau > 1 && tau < w) {
+      const s0 = dNorm[tau - 1], s1 = dNorm[tau], s2 = dNorm[tau + 1];
+      const denom = s0 - 2 * s1 + s2;
+      if (denom !== 0) {
+        const delta = (s0 - s2) / (2 * denom);
+        if (delta > -1 && delta < 1) {
+          return sampleRate / (tau + delta);
+        }
+      }
+    }
+    return sampleRate / tau;
+  }
+
+  // ---------- 主循环（requestAnimationFrame + 节流到约 20fps）----------
+  function tick(ts) {
+    rafID = requestAnimationFrame(tick);
+    if (!state.running) return;
+    if (ts - lastProcess < 50) return;
+    lastProcess = ts;
+
+    analyser.getFloatTimeDomainData(timeData);
+    const f = detectPitch(timeData, ctx.sampleRate);
+
+    if (f && f > 30 && f < 1000) {
+      // 中值滤波：取最近 3 次原始频率的中值，抑制偶发的八度跳变
+      recent.push(f);
+      if (recent.length > 3) recent.shift();
+      const sorted = recent.slice().sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+
+      // 指数平滑，减少抖动
+      state.freq = state.freq === null ? median : state.freq * 0.6 + median * 0.4;
+      lastDetection = ts;
+      renderNote(state.freq);
+    } else if (ts - lastDetection > 600) {
+      // 超过 600ms 无有效声音 → 回到静默态
+      state.freq = null;
+      recent = [];
+      renderSilent();
+    }
+  }
+
+  // ---------- UI 渲染 ----------
+  const gaugeWrap = document.getElementById("gaugeWrap");
+  const noteNameEl = document.getElementById("noteName");
+  const noteOctEl = document.getElementById("noteOct");
+  const noteNameWrap = document.getElementById("noteNameWrap");
+  const noteStatusEl = document.getElementById("noteStatus");
+  const noteFreqEl = document.getElementById("noteFreq");
+  const chipsEl = document.getElementById("chips");
+  let needleGroup = null;
+
+  function currentStrings() { return TUNINGS[state.instrument].strings; }
+
+  function renderNote(freq) {
+    const midi = freqToMidi(freq);
+    const nearest = Math.round(midi);
+    const cents = 1200 * (midi - nearest);
+    const name = noteNameOf(nearest);
+    const octave = octaveOf(nearest);
+
+    noteNameEl.textContent = name;
+    noteOctEl.textContent = octave;
+
+    const inTune = Math.abs(cents) <= TUNE_CENTS;
+    noteNameWrap.classList.toggle("tuned", inTune);
+    noteStatusEl.className = "note-status" + (inTune ? " tuned" : cents > 0 ? " sharp" : " flat");
+    noteStatusEl.textContent = inTune
+      ? "已调准 ✓"
+      : (cents > 0 ? "偏高" : "偏低") + " " + (cents > 0 ? "+" : "") + Math.round(cents) + " 音分";
+
+    const matched = currentStrings().find(s => s.midi === nearest);
+    noteFreqEl.textContent = freq.toFixed(1) + " Hz" + (matched ? " · " + matched.num + "弦" : "");
+
+    setNeedle(cents, inTune);
+    syncChips(nearest, inTune);
+  }
+
+  function renderSilent() {
+    noteNameEl.textContent = "——";
+    noteOctEl.textContent = "";
+    noteNameWrap.classList.remove("tuned");
+    noteStatusEl.className = "note-status";
+    noteStatusEl.textContent = "等待声音…";
+    noteFreqEl.textContent = "";
+    syncChips(null, false);
+  }
+
+  function setStatus(text, cls) {
+    noteStatusEl.className = "note-status " + (cls || "");
+    noteStatusEl.textContent = text;
+  }
+
+  // ---------- 表盘（SVG 动态构建）----------
+  function buildGauge() {
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("viewBox", "0 0 240 140");
+    svg.setAttribute("class", "gauge-svg");
+
+    const cx = 120, cy = 130, r = 96;
+
+    // 角度换算：音分 c ∈ [-50, 50] → 角度 deg ∈ [-90, 90]（0 = 竖直向上）
+    function pt(c, radius) {
+      const deg = (c / GAUGE_RANGE) * 90 * (Math.PI / 180);
+      return { x: cx + radius * Math.sin(deg), y: cy - radius * Math.cos(deg) };
+    }
+    function arcPath(c1, c2, radius) {
+      const p1 = pt(c1, radius), p2 = pt(c2, radius);
+      return "M " + p1.x.toFixed(2) + " " + p1.y.toFixed(2) +
+             " A " + radius + " " + radius + " 0 0 1 " + p2.x.toFixed(2) + " " + p2.y.toFixed(2);
+    }
+
+    // 背景弧
+    const bg = document.createElementNS(svgNS, "path");
+    bg.setAttribute("d", arcPath(-GAUGE_RANGE, GAUGE_RANGE, r));
+    bg.setAttribute("fill", "none");
+    bg.setAttribute("stroke", "#3a3a44");
+    bg.setAttribute("stroke-width", "7");
+    bg.setAttribute("stroke-linecap", "round");
+    svg.appendChild(bg);
+
+    // 绿色调准区（±5 音分）
+    const good = document.createElementNS(svgNS, "path");
+    good.setAttribute("d", arcPath(-TUNE_CENTS, TUNE_CENTS, r));
+    good.setAttribute("fill", "none");
+    good.setAttribute("stroke", "#30d158");
+    good.setAttribute("stroke-width", "7");
+    good.setAttribute("stroke-linecap", "round");
+    svg.appendChild(good);
+
+    // 刻度
+    for (let c = -GAUGE_RANGE; c <= GAUGE_RANGE; c += 10) {
+      const major = c % 20 === 0;
+      const p1 = pt(c, r - 10), p2 = pt(c, r - (major ? 22 : 16));
+      const line = document.createElementNS(svgNS, "line");
+      line.setAttribute("x1", p1.x); line.setAttribute("y1", p1.y);
+      line.setAttribute("x2", p2.x); line.setAttribute("y2", p2.y);
+      line.setAttribute("stroke", "#9a9aa5");
+      line.setAttribute("stroke-width", major ? "2.5" : "1.5");
+      svg.appendChild(line);
+    }
+
+    // 指针
+    needleGroup = document.createElementNS(svgNS, "g");
+    const needle = document.createElementNS(svgNS, "line");
+    needle.setAttribute("x1", cx); needle.setAttribute("y1", cy);
+    needle.setAttribute("x2", cx); needle.setAttribute("y2", cy - (r - 18));
+    needle.setAttribute("stroke", "#f2f2f5");
+    needle.setAttribute("stroke-width", "4");
+    needle.setAttribute("stroke-linecap", "round");
+    needleGroup.appendChild(needle);
+    svg.appendChild(needleGroup);
+
+    // 圆心
+    const pivot = document.createElementNS(svgNS, "circle");
+    pivot.setAttribute("cx", cx); pivot.setAttribute("cy", cy);
+    pivot.setAttribute("r", "7");
+    pivot.setAttribute("fill", "#f2f2f5");
+    svg.appendChild(pivot);
+
+    gaugeWrap.innerHTML = "";
+    gaugeWrap.appendChild(svg);
+  }
+
+  function setNeedle(cents, inTune) {
+    if (!needleGroup) return;
+    let c = cents == null ? 0 : Math.max(-GAUGE_RANGE, Math.min(GAUGE_RANGE, cents));
+    const deg = (c / GAUGE_RANGE) * 90;
+    needleGroup.setAttribute("transform", "rotate(" + deg.toFixed(1) + " 120 130)");
+    const line = needleGroup.firstChild;
+    line.setAttribute("stroke", inTune ? "#30d158" : "#f2f2f5");
+  }
+
+  // ---------- UI 构建 ----------
+  function buildInstrumentSeg() {
+    const segEl = document.getElementById("instSeg");
+    segEl.innerHTML = "";
+    for (const key of Object.keys(TUNINGS)) {
+      const btn = document.createElement("button");
+      btn.textContent = TUNINGS[key].label;
+      btn.onclick = () => { setInstrument(key); };
+      segEl.appendChild(btn);
+    }
+  }
+
+  function buildChips() {
+    chipsEl.innerHTML = "";
+    currentStrings().forEach((s) => {
+      const btn = document.createElement("button");
+      btn.className = "chip";
+      btn.innerHTML = '<span class="chip-num">' + s.num + '弦</span> ' + noteNameOf(s.midi) + octaveOf(s.midi);
+      chipsEl.appendChild(btn);
+    });
+  }
+
+  function syncChips(nearestMidi, inTune) {
+    [...chipsEl.children].forEach((btn, i) => {
+      const s = currentStrings()[i];
+      const active = nearestMidi != null && s.midi === nearestMidi;
+      btn.classList.toggle("active", active);
+      btn.classList.toggle("tuned", active && inTune);
+    });
+  }
+
+  function setInstrument(key) {
+    state.instrument = key;
+    buildChips();
+    syncChips(null, false);
+    // 切换乐器后，把音符显示复位，等下一次检测再更新
+    if (!state.running) { renderSilent(); setNeedle(0, false); }
+    [...document.getElementById("instSeg").children].forEach((btn, i) => {
+      btn.classList.toggle("selected", Object.keys(TUNINGS)[i] === key);
+    });
+  }
+
+  function updatePlayIcon() {
+    document.getElementById("playIcon").textContent = state.running ? "■" : "▶";
+  }
+
+  document.getElementById("play").onclick = () => {
+    state.running ? stop() : start();
+  };
+
+  // 初始
+  buildGauge();
+  buildInstrumentSeg();
+  buildChips();
+  setInstrument("guitar");
+})();
+</script>
+</body>
+</html>
